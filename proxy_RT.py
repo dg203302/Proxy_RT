@@ -33,7 +33,14 @@ app.add_middleware(
 
 def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False)
+        browser = playwright.chromium.launch(headless=False, args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--no-zygote",
+                "--single-process"
+            ])
         context = browser.new_context(
             geolocation={"latitude": LATITUD, "longitude": LONGITUD},
             permissions=["geolocation"],
