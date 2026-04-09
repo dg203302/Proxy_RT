@@ -5,8 +5,10 @@ services:
     healthCheckPath: /health
     envVars:
       - key: PLAYWRIGHT_HEADLESS
-        value: "true"
+        value: "false"
       - key: TIMEOUT_DEFAULT_MS
-        value: "6000"
+        value: "4500"
       - key: MAX_RENDER_RETRIES
-        value: "2"
+        value: "1"
+      - key: ARRIVALS_LOCK_TIMEOUT_MS
+        value: "5000"

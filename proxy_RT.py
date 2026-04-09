@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 from typing import Any
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException
@@ -13,6 +14,8 @@ LONGITUD = float(os.getenv("LONGITUD", "-68.5364"))
 TIMEOUT_DEFAULT_MS = int(os.getenv("TIMEOUT_DEFAULT_MS", "4000"))
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
 MAX_RENDER_RETRIES = int(os.getenv("MAX_RENDER_RETRIES", "2"))
+ARRIVALS_LOCK_TIMEOUT_MS = int(os.getenv("ARRIVALS_LOCK_TIMEOUT_MS", "5000"))
+ARRIVALS_LOCK = threading.Lock()
 
 
 class ArrivalRequest(BaseModel):
@@ -120,56 +123,66 @@ def _perform_arrival_lookup(page: Any, linea: str, parada: str) -> dict[str, Any
     }
 
 def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=PLAYWRIGHT_HEADLESS,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--no-zygote",
-                "--disable-blink-features=AutomationControlled",
-            ]
+    lock_acquired = ARRIVALS_LOCK.acquire(timeout=ARRIVALS_LOCK_TIMEOUT_MS / 1000)
+    if not lock_acquired:
+        raise HTTPException(
+            status_code=503,
+            detail="Servicio ocupado. Reintenta en unos segundos.",
         )
-        USER_AGENT_FALSO = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        context = browser.new_context(
-            geolocation={"latitude": LATITUD, "longitude": LONGITUD},
-            permissions=["geolocation"],
-            locale="es-AR",
-            viewport={"width": 1366, "height": 900},
-            user_agent=USER_AGENT_FALSO  # ¡Moovit se come el amague!
-        )
-        context.add_init_script(
-            """
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-            });
-            """
-        )
-        page = context.new_page()
-        page.set_default_timeout(TIMEOUT_DEFAULT_MS * 6)
 
-        try:
-            for attempt in range(1, MAX_RENDER_RETRIES + 1):
-                try:
-                    return _perform_arrival_lookup(page=page, linea=linea, parada=parada)
-                except PlaywrightTimeoutError:
-                    if attempt == MAX_RENDER_RETRIES:
-                        raise
-                    page.goto("about:blank")
-                    page.wait_for_timeout(600)
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=PLAYWRIGHT_HEADLESS,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-zygote",
+                    "--disable-blink-features=AutomationControlled",
+                ]
+            )
+            USER_AGENT_FALSO = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            context = browser.new_context(
+                geolocation={"latitude": LATITUD, "longitude": LONGITUD},
+                permissions=["geolocation"],
+                locale="es-AR",
+                viewport={"width": 1366, "height": 900},
+                user_agent=USER_AGENT_FALSO  # ¡Moovit se come el amague!
+            )
+            context.add_init_script(
+                """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                });
+                """
+            )
+            page = context.new_page()
+            page.set_default_timeout(TIMEOUT_DEFAULT_MS * 6)
 
-        except PlaywrightTimeoutError as exc:
-            raise HTTPException(status_code=504, detail=f"Timeout al consultar Moovit: {exc}") from exc
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Error interno al obtener arribos: {exc}") from exc
-        finally:
-            page.close()
-            context.close()
-            browser.close()
+            try:
+                for attempt in range(1, MAX_RENDER_RETRIES + 1):
+                    try:
+                        return _perform_arrival_lookup(page=page, linea=linea, parada=parada)
+                    except PlaywrightTimeoutError:
+                        if attempt == MAX_RENDER_RETRIES:
+                            raise
+                        page.goto("about:blank")
+                        page.wait_for_timeout(600)
+
+            except PlaywrightTimeoutError as exc:
+                raise HTTPException(status_code=504, detail=f"Timeout al consultar Moovit: {exc}") from exc
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Error interno al obtener arribos: {exc}") from exc
+            finally:
+                page.close()
+                context.close()
+                browser.close()
+    finally:
+        ARRIVALS_LOCK.release()
 
 
 @app.get("/health")
