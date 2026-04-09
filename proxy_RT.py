@@ -12,6 +12,7 @@ LATITUD = float(os.getenv("LATITUD", "-31.5375"))
 LONGITUD = float(os.getenv("LONGITUD", "-68.5364"))
 TIMEOUT_DEFAULT_MS = int(os.getenv("TIMEOUT_DEFAULT_MS", "4000"))
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
+MAX_RENDER_RETRIES = int(os.getenv("MAX_RENDER_RETRIES", "2"))
 
 
 class ArrivalRequest(BaseModel):
@@ -58,6 +59,66 @@ def _resolve_search_box(page: Any, timeout_ms: int) -> Any:
 
     raise PlaywrightTimeoutError("No se encontro el buscador de lineas en el DOM.")
 
+
+def _perform_arrival_lookup(page: Any, linea: str, parada: str) -> dict[str, Any]:
+    page.goto(URL_MOOVIT, wait_until="domcontentloaded", timeout=TIMEOUT_DEFAULT_MS * 6)
+    page.wait_for_load_state("networkidle", timeout=TIMEOUT_DEFAULT_MS * 6)
+
+    for text in ["Aceptar", "Acepto", "Entendido", "Aceptar todo"]:
+        button = page.get_by_role("button", name=re.compile(text, re.IGNORECASE)).first
+        if button.count() > 0:
+            button.click(timeout=1500)
+            break
+
+    search_box = _resolve_search_box(page, timeout_ms=TIMEOUT_DEFAULT_MS * 6)
+    search_box.click()
+    search_box.fill(linea)
+    search_box.press("Enter")
+
+    line_item = page.locator(".line-item").first
+    line_item.wait_for(state="visible", timeout=TIMEOUT_DEFAULT_MS * 6)
+    line_item.click(timeout=TIMEOUT_DEFAULT_MS * 4)
+
+    stop_item = page.locator(".title").filter(has_text=parada).first
+    stop_item.wait_for(state="visible", timeout=TIMEOUT_DEFAULT_MS * 6)
+
+    with page.expect_response(
+        lambda response: "/api/lines/linearrival" in response.url and response.status == 200,
+        timeout=TIMEOUT_DEFAULT_MS * 6,
+    ) as arrival_response:
+        stop_item.click(timeout=TIMEOUT_DEFAULT_MS * 4)
+
+    data = arrival_response.value.json()
+
+    if not data:
+        return {
+            "linea": linea,
+            "parada": parada,
+            "arrivals": [],
+            "message": "No se recibieron datos de arribos para la parada indicada.",
+        }
+
+    arrivals = data[0].get("arrivals", []) if isinstance(data, list) else []
+    if not arrivals:
+        current_text = "No hay arribos disponibles."
+        current_locator = page.locator("div.current.ng-star-inserted span.ng-star-inserted").first
+        if current_locator.count() > 0:
+            current_text = current_locator.inner_text().strip()
+
+        return {
+            "linea": linea,
+            "parada": parada,
+            "arrivals": [],
+            "message": current_text,
+        }
+
+    return {
+        "linea": linea,
+        "parada": parada,
+        "arrivals": arrivals,
+        "raw": data,
+    }
+
 def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -68,7 +129,6 @@ def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--no-zygote",
-                "--single-process",
                 "--disable-blink-features=AutomationControlled",
             ]
         )
@@ -91,58 +151,14 @@ def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
         page.set_default_timeout(TIMEOUT_DEFAULT_MS * 6)
 
         try:
-            page.goto(URL_MOOVIT, wait_until="domcontentloaded", timeout=TIMEOUT_DEFAULT_MS * 4)
-            page.wait_for_load_state("networkidle", timeout=TIMEOUT_DEFAULT_MS * 4)
-
-            for text in ["Aceptar", "Acepto", "Entendido", "Aceptar todo"]:
-                button = page.get_by_role("button", name=re.compile(text, re.IGNORECASE)).first
-                if button.count() > 0:
-                    button.click(timeout=1500)
-                    break
-
-            search_box = _resolve_search_box(page, timeout_ms=TIMEOUT_DEFAULT_MS * 4)
-            search_box.fill(linea)
-            search_box.press("Enter")
-            page.wait_for_timeout(TIMEOUT_DEFAULT_MS)
-
-            page.locator(".line-item").first.click(timeout=TIMEOUT_DEFAULT_MS * 2)
-
-            with page.expect_response(
-                lambda response: "/api/lines/linearrival" in response.url and response.status == 200,
-                timeout=TIMEOUT_DEFAULT_MS * 4,
-            ) as arrival_response:
-                page.locator(".title").filter(has_text=parada).first.click(timeout=TIMEOUT_DEFAULT_MS * 2)
-
-            data = arrival_response.value.json()
-
-            if not data:
-                return {
-                    "linea": linea,
-                    "parada": parada,
-                    "arrivals": [],
-                    "message": "No se recibieron datos de arribos para la parada indicada.",
-                }
-
-            arrivals = data[0].get("arrivals", []) if isinstance(data, list) else []
-            if not arrivals:
-                current_text = "No hay arribos disponibles."
-                current_locator = page.locator("div.current.ng-star-inserted span.ng-star-inserted").first
-                if current_locator.count() > 0:
-                    current_text = current_locator.inner_text().strip()
-
-                return {
-                    "linea": linea,
-                    "parada": parada,
-                    "arrivals": [],
-                    "message": current_text,
-                }
-
-            return {
-                "linea": linea,
-                "parada": parada,
-                "arrivals": arrivals,
-                "raw": data,
-            }
+            for attempt in range(1, MAX_RENDER_RETRIES + 1):
+                try:
+                    return _perform_arrival_lookup(page=page, linea=linea, parada=parada)
+                except PlaywrightTimeoutError:
+                    if attempt == MAX_RENDER_RETRIES:
+                        raise
+                    page.goto("about:blank")
+                    page.wait_for_timeout(600)
 
         except PlaywrightTimeoutError as exc:
             raise HTTPException(status_code=504, detail=f"Timeout al consultar Moovit: {exc}") from exc

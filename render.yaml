@@ -2,6 +2,11 @@ services:
   - type: web
     name: proxy-rt-api
     env: docker
+    healthCheckPath: /health
     envVars:
       - key: PLAYWRIGHT_HEADLESS
         value: "true"
+      - key: TIMEOUT_DEFAULT_MS
+        value: "6000"
+      - key: MAX_RENDER_RETRIES
+        value: "2"
