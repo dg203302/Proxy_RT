@@ -1,6 +1,6 @@
 import os
 from typing import Any
-
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -23,7 +23,13 @@ app = FastAPI(
     version="1.0.0",
     description="API para consultar arribos de lineas por parada usando Playwright.",
 )
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # El "*" permite que cualquier página se conecte. 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
     with sync_playwright() as playwright:
