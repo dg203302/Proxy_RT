@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException
@@ -9,7 +10,7 @@ from playwright.sync_api import sync_playwright
 URL_MOOVIT = "https://moovitapp.com/tripplan/san_juan-6137/lines/es-419?customerId=NPIdiV-P9Gcj-pA7yOXVPg"
 LATITUD = float(os.getenv("LATITUD", "-31.5375"))
 LONGITUD = float(os.getenv("LONGITUD", "-68.5364"))
-TIMEOUT_DEFAULT_MS = int(os.getenv("TIMEOUT_DEFAULT_MS", "2500"))
+TIMEOUT_DEFAULT_MS = int(os.getenv("TIMEOUT_DEFAULT_MS", "4000"))
 PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
 
 
@@ -31,6 +32,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+def _resolve_search_box(page: Any, timeout_ms: int) -> Any:
+    candidate_selectors = [
+        "input[placeholder*='linea' i]",
+        "input[placeholder*='linea']",
+        "input[placeholder*='line' i]",
+        "input[type='search']",
+        "input[aria-label*='linea' i]",
+        "input[aria-label*='line' i]",
+    ]
+
+    for selector in candidate_selectors:
+        locator = page.locator(selector).first
+        if locator.count() > 0:
+            locator.wait_for(state="visible", timeout=timeout_ms)
+            return locator
+
+    try:
+        regex_locator = page.get_by_placeholder(re.compile(r"buscar una l[ií]nea", re.IGNORECASE)).first
+        regex_locator.wait_for(state="visible", timeout=timeout_ms)
+        return regex_locator
+    except PlaywrightTimeoutError:
+        pass
+
+    raise PlaywrightTimeoutError("No se encontro el buscador de lineas en el DOM.")
+
 def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -41,22 +68,39 @@ def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--no-zygote",
-                "--single-process"
+                "--single-process",
+                "--disable-blink-features=AutomationControlled",
             ]
         )
         USER_AGENT_FALSO = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         context = browser.new_context(
             geolocation={"latitude": LATITUD, "longitude": LONGITUD},
             permissions=["geolocation"],
+            locale="es-AR",
+            viewport={"width": 1366, "height": 900},
             user_agent=USER_AGENT_FALSO  # ¡Moovit se come el amague!
         )
+        context.add_init_script(
+            """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+            });
+            """
+        )
         page = context.new_page()
+        page.set_default_timeout(TIMEOUT_DEFAULT_MS * 6)
 
         try:
             page.goto(URL_MOOVIT, wait_until="domcontentloaded", timeout=TIMEOUT_DEFAULT_MS * 4)
-            page.wait_for_timeout(TIMEOUT_DEFAULT_MS)
+            page.wait_for_load_state("networkidle", timeout=TIMEOUT_DEFAULT_MS * 4)
 
-            search_box = page.get_by_placeholder("Buscar una linea")
+            for text in ["Aceptar", "Acepto", "Entendido", "Aceptar todo"]:
+                button = page.get_by_role("button", name=re.compile(text, re.IGNORECASE)).first
+                if button.count() > 0:
+                    button.click(timeout=1500)
+                    break
+
+            search_box = _resolve_search_box(page, timeout_ms=TIMEOUT_DEFAULT_MS * 4)
             search_box.fill(linea)
             search_box.press("Enter")
             page.wait_for_timeout(TIMEOUT_DEFAULT_MS)
