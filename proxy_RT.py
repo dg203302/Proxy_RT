@@ -33,17 +33,22 @@ app.add_middleware(
 
 def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False, args=[
+        browser = playwright.chromium.launch(
+            headless=PLAYWRIGHT_HEADLESS,
+            args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--no-zygote",
                 "--single-process"
-            ])
+            ]
+        )
+        USER_AGENT_FALSO = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         context = browser.new_context(
             geolocation={"latitude": LATITUD, "longitude": LONGITUD},
             permissions=["geolocation"],
+            user_agent=USER_AGENT_FALSO  # ¡Moovit se come el amague!
         )
         page = context.new_page()
 

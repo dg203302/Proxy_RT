@@ -4,4 +4,4 @@ services:
     env: docker
     envVars:
       - key: PLAYWRIGHT_HEADLESS
-        value: "false"
+        value: "true"
