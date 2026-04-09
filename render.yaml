@@ -1,11 +1,7 @@
 services:
   - type: web
     name: proxy-rt-api
-    env: python
-    buildCommand: "pip install -r requirements.txt && playwright install chromium"
-    startCommand: "uvicorn proxy_RT:app --host 0.0.0.0 --port $PORT"
+    env: docker
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.0"
       - key: PLAYWRIGHT_HEADLESS
         value: "true"
