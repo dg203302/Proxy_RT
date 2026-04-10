@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-URL_MVIT = "https://moovitapp.com/tripplan/san_juan-6137/lines/es-419?customerId=NPIdiV-P9Gcj-pA7yOXVPg"
 LATITUD = float(os.getenv("LATITUD", "-31.5375"))
 LONGITUD = float(os.getenv("LONGITUD", "-68.5364"))
 TIMEOUT_DEFAULT_MS = int(os.getenv("TIMEOUT_DEFAULT_MS", "1500"))
@@ -22,8 +21,8 @@ ARRIVALS_LOCK = threading.Lock()
 
 
 class ArrivalRequest(BaseModel):
-    linea: str = Field(..., min_length=1, examples=["129"])
-    parada: str = Field(..., min_length=2, examples=["Av. Ig. De La Roza y Los Jesuitas S -A"])
+    url: str = Field(..., min_length=8, examples=["https://example.com/"])
+    id_p: str = Field(..., min_length=1, examples=["stop-123"])
 
 
 app = FastAPI(
@@ -40,50 +39,54 @@ app.add_middleware(
 )
 
 
-def _do_lookup(page: Any, linea: str, parada: str) -> dict[str, Any]:
-    page.goto(URL_MVIT, wait_until="domcontentloaded", timeout=TIMEOUT_DEFAULT_MS * 8)
-    page.wait_for_timeout(TIMEOUT_DEFAULT_MS)
+def _do_lookup(page: Any, url: str, id_p: str) -> dict[str, Any]:
+    page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_DEFAULT_MS * 8)
+    page.wait_for_timeout(2000)
 
-    buscador = page.get_by_placeholder("Buscar una línea")
-    buscador.fill(linea)
-    buscador.press("Enter")
-    page.wait_for_timeout(TIMEOUT_DEFAULT_MS)
+    selector_objetivo = f'[id="{id_p}"]'
+    try:
+        page.wait_for_selector(selector_objetivo, state="attached", timeout=TIMEOUT_DEFAULT_MS * 8)
+    except PlaywrightTimeoutError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No se encontró un elemento con id '{id_p}' en el DOM (timeout esperando selector).",
+        ) from exc
 
-    page.locator(".line-item").first.click(timeout=TIMEOUT_DEFAULT_MS * 4)
+    objetivo = page.locator(selector_objetivo).first
 
     with page.expect_response(
         lambda response: "/api/lines/linearrival" in response.url and response.status == 200,
         timeout=TIMEOUT_DEFAULT_MS * 8,
     ) as inf_resp:
-        page.locator(".title").filter(has_text=parada).first.click(timeout=TIMEOUT_DEFAULT_MS * 4)
-        page.wait_for_timeout(TIMEOUT_DEFAULT_MS)
+        objetivo.click(timeout=TIMEOUT_DEFAULT_MS * 4)
 
     datos = inf_resp.value.json()
-    arrivals = datos[0].get("arrivals", []) if isinstance(datos, list) and datos else []
+    page.wait_for_timeout(500)
+    arrivals: list[Any] = []
+    if isinstance(datos, list) and datos:
+        arrivals = datos[0].get("arrivals", []) if isinstance(datos[0], dict) else []
 
     if not arrivals:
-        mensaje = "No hay arribos disponibles."
+        horario_estimado: str | None = None
         elem = page.locator("div.current.ng-star-inserted span.ng-star-inserted").first
         if elem.count() > 0:
-            mensaje = elem.inner_text().strip()
+            horario_estimado = elem.inner_text().strip()
 
         return {
-            "linea": linea,
-            "parada": parada,
+            "id_p": id_p,
             "arrivals": [],
-            "message": mensaje,
+            "horario_estimado": horario_estimado,
             "raw": datos,
         }
 
     return {
-        "linea": linea,
-        "parada": parada,
+        "id_p": id_p,
         "arrivals": arrivals,
         "raw": datos,
     }
 
 
-def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
+def fetch_arrivals(url: str, id_p: str) -> dict[str, Any]:
     lock_ok = ARRIVALS_LOCK.acquire(timeout=LOCK_TIMEOUT_MS / 1000)
     if not lock_ok:
         raise HTTPException(status_code=503, detail="Servicio ocupado. Reintenta en unos segundos.")
@@ -110,7 +113,7 @@ def fetch_arrivals(linea: str, parada: str) -> dict[str, Any]:
             try:
                 for intento in range(1, MAX_RETRIES + 1):
                     try:
-                        return _do_lookup(page=page, linea=linea, parada=parada)
+                        return _do_lookup(page=page, url=url, id_p=id_p)
                     except PlaywrightTimeoutError:
                         if intento == MAX_RETRIES:
                             raise
@@ -137,7 +140,7 @@ def healthcheck() -> dict[str, str]:
 
 @app.post("/arrivals")
 def arrivals(payload: ArrivalRequest) -> dict[str, Any]:
-    return fetch_arrivals(linea=payload.linea, parada=payload.parada)
+    return fetch_arrivals(url=payload.url, id_p=payload.id_p)
 
 
 if __name__ == "__main__":
